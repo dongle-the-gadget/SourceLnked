@@ -21,6 +21,12 @@ internal class Program
     {
         Console.OutputEncoding = Encoding.UTF8;
 
+        if (args.Length < 1)
+        {
+            PrintError("No file specified.");
+            return;
+        }
+
         string file = args[0];
         byte[] fileData = File.ReadAllBytes(file);
 
