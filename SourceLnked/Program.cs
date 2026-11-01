@@ -1,9 +1,15 @@
-﻿using AsmResolver.PE.DotNet.Metadata;
+﻿using AsmResolver;
+using AsmResolver.IO;
+using AsmResolver.PE;
+using AsmResolver.PE.Debug;
+using AsmResolver.PE.DotNet.Metadata;
 using AsmResolver.PE.DotNet.Metadata.Tables;
 using AsmResolver.Symbols.Pdb.Metadata.Info;
 using AsmResolver.Symbols.Pdb.Msf;
 using SourceLnked.SrcSrv;
 using Spectre.Console;
+using System.Diagnostics.CodeAnalysis;
+using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
 
@@ -25,6 +31,71 @@ internal class Program
         else if (fileData.StartsWith(Constants.MsfBigMagic))
         {
             AnalyzeFromWindowsPdb(MsfFile.FromBytes(fileData));
+        }
+        else if (fileData.StartsWith(Constants.MZMagic))
+        {
+            try
+            {
+                PrintInformation("PE file detected, analyzing...");
+                Console.WriteLine();
+
+                PEImage image = PEImage.FromBytes(fileData);
+
+                IEnumerable<IDebugDataSegment> validDebugContents = 
+                    image.DebugData
+                    .Where(static x => x.Contents is not null && x.Contents is not EmptyDebugDataSegment)
+                    .Select(static x => x.Contents)!;
+
+                // Attempt 1: embedded portable PDB.
+
+                IDebugDataSegment? embeddedPortablePdb = validDebugContents.FirstOrDefault(static x => x.Type == (DebugDataType)17);
+
+                if (embeddedPortablePdb is not null)
+                {
+                    byte[] pdbContents = embeddedPortablePdb.WriteIntoArray();
+                    if (!TryDecodeEmbeddedPdb(new BinaryStreamReader(pdbContents), out byte[]? decompressed))
+                    {
+                        PrintError("Embedded portable PDB is malformed.");
+                        return;
+                    }
+                    AnalyzeFromPortablePdb(MetadataDirectory.FromBytes(decompressed));
+                    return;
+                }
+
+                // Attempt 2: code view.
+
+                CodeViewDataSegment? codeViewSegment = (CodeViewDataSegment?)validDebugContents.FirstOrDefault(static x => x.Type == DebugDataType.CodeView);
+                if (codeViewSegment is not null && codeViewSegment.Signature == CodeViewSignature.Rsds)
+                {
+                    RsdsDataSegment rsds = (RsdsDataSegment)codeViewSegment;
+                    if (rsds.Path is null)
+                    {
+                        PrintError("No PDB path available.");
+                        return;
+                    }
+                    try
+                    {
+                        byte[] windowsPdb = File.ReadAllBytes(rsds.Path);
+                        AnalyzeFromWindowsPdb(MsfFile.FromBytes(windowsPdb));
+                    }
+                    catch (FileNotFoundException)
+                    {
+                        PrintError($"Embedded PDB path \"{rsds.Path}\" does not exist.");
+                    }
+                    catch
+                    {
+                        PrintError($"Failed to read embedded PDB path \"{rsds.Path}\".");
+                    }
+                }
+                else
+                {
+                    PrintError("No embedded portable PDB or CodeView debug information is available.");
+                }
+            }
+            catch (BadImageFormatException)
+            {
+                PrintError("Unrecognized file format.");
+            }
         }
         else if (fileData.StartsWith(Constants.ComPlusMagic))
         {
@@ -301,5 +372,45 @@ internal class Program
     static void PrintInformation(string message)
     {
         AnsiConsole.MarkupLineInterpolated($"[cyan]{"[i]"} Info:[/] {message}");
+    }
+
+    static bool TryDecodeEmbeddedPdb(BinaryStreamReader reader, [NotNullWhen(true)] out byte[]? result)
+    {
+        // Adapted from https://github.com/dotnet/runtime/blob/c772c4c690751e87571422feb3c5af17055ce6cc/src/libraries/System.Reflection.Metadata/src/System/Reflection/PortableExecutable/PEReader.EmbeddedPortablePdb.cs#L69-L134
+
+        Span<byte> magic = stackalloc byte[4];
+        if (!reader.CanRead(4))
+        {
+            goto Failure;
+        }
+        reader.ReadBytes(magic);
+        if (!magic.SequenceEqual(Constants.DebugDataMagic))
+        {
+            goto Failure;
+        }
+
+        int decompressedSize = reader.ReadInt32();
+        byte[] rest = reader.ReadToEnd();
+        byte[] decompressed = new byte[decompressedSize];
+
+        using (MemoryStream compressed = new(rest))
+        {
+            using DeflateStream deflateStream = new(compressed, CompressionMode.Decompress);
+            if (deflateStream.ReadAtLeast(decompressed, decompressedSize, false) != decompressedSize)
+            {
+                goto Failure;
+            }
+
+            if (deflateStream.ReadByte() != -1)
+            {
+                goto Failure;
+            }
+        }
+
+        result = decompressed;
+        return true;
+Failure:
+        result = null;
+        return false;
     }
 }

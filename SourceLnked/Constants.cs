@@ -18,6 +18,10 @@ internal static class Constants
 
     public static ReadOnlySpan<byte> ComPlusMagic => "COM+"u8;
 
+    public static ReadOnlySpan<byte> MZMagic => "MZ"u8;
+
+    public static ReadOnlySpan<byte> DebugDataMagic => "MPDB"u8;
+
     public const int InfoSuccess = 0;
 
     public const int InfoFail = 1;
