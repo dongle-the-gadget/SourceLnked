@@ -1,6 +1,6 @@
 # SourceLnked
 
-Inspects Source Linked and Source Server metadata in PDB symbols.
+Inspects Source Link and Source Server metadata in PDB symbols.
 Supports both Portable PDBs (.NET Core/.NET 5+) and Windows PDBs (tested with C++).
 
 ## Usage
